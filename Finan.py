@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -22,18 +23,15 @@ COLORS = [
     "#c084fc", "#2dd4bf", "#f97316", "#a3e635", "#e879f9",
 ]
 
-DEFAULT_INCOME = 618.0
+DEFAULT_INCOME = 350.0
 DEFAULT_EXPENSES = [
-    {"paid": False, "name": "Universidad (UMECIT)", "amount": 100.0},
-    {"paid": False, "name": "Pasaje / Transporte", "amount": 75.0},
-    {"paid": False, "name": "Comida", "amount": 25.0},
-    {"paid": False, "name": "Préstamo BG", "amount": 80.0},
-    {"paid": False, "name": "TC BAC (PS5 + Cámara)", "amount": 0.0},
-    {"paid": False, "name": "TC Banistmo", "amount": 30.0},
+    {"paid": False, "name": "Alquiler", "amount": 100.0},
+    {"paid": False, "name": "Comida", "amount": 60.0},
+    {"paid": False, "name": "Transporte", "amount": 40.0},
+    {"paid": False, "name": "Luz y agua", "amount": 25.0},
     {"paid": False, "name": "Internet", "amount": 20.0},
-    {"paid": False, "name": "Data", "amount": 20.0},
-    {"paid": False, "name": "Spotify", "amount": 13.0},
-    {"paid": False, "name": "Lou", "amount": 50.0},
+    {"paid": False, "name": "Celular", "amount": 15.0},
+    {"paid": False, "name": "Ahorro", "amount": 30.0},
 ]
 
 st.set_page_config(page_title="Flujo Quincenal", page_icon="💰", layout="centered")
@@ -67,6 +65,29 @@ st.markdown("""
     [data-testid="stMetric"] { padding: 10px 12px; }
     [data-testid="stMetricValue"] { font-size: 1.35rem; }
     h1 { font-size: 1.8rem; }
+}
+
+/* Barra de herramientas de la tabla siempre visible (en celular no hay "hover") */
+[data-testid="stElementToolbar"] { opacity: 1 !important; }
+[data-testid="stElementToolbarButton"] button {
+    min-width: 36px; min-height: 36px; border-radius: 8px;
+}
+/* Botón de borrar: rojo y llamativo cuando hay filas seleccionadas */
+[data-testid="stElementToolbarButton"] button[aria-label="Delete row(s)"] {
+    background: #ef4444 !important; color: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.35);
+    animation: trash-pulse 1.4s ease-in-out infinite;
+}
+[data-testid="stElementToolbarButton"] button[aria-label="Delete row(s)"]:hover {
+    background: #dc2626 !important;
+}
+/* Botón de añadir fila: verde */
+[data-testid="stElementToolbarButton"] button[aria-label="Add row"] {
+    background: #16a34a !important; color: #ffffff !important;
+}
+@keyframes trash-pulse {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.35); }
+    50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.15); }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -170,6 +191,180 @@ def money(value):
     return f"${value:,.2f}"
 
 
+def build_message(period, income, total, paid_total, pending_total, balance, commitment, expenses):
+    """Texto del resumen para WhatsApp (usa *negritas* de WhatsApp)."""
+    lines = [
+        f"💰 *Resumen – {period_label(period)}*",
+        "",
+        f"Ingreso: {money(income)}",
+        f"Gastos: {money(total)} ({commitment:.0f}% del ingreso)",
+        f"Pagado: {money(paid_total)} · Pendiente: {money(pending_total)}",
+        f"*Disponible: {money(balance)}*",
+    ]
+    items = [e for e in expenses if e["amount"] > 0]
+    if items:
+        lines += ["", "*Gastos:*"]
+        lines += [
+            f"{'✅' if e['paid'] else '⏳'} {e['name']}: {money(e['amount'])}"
+            for e in sorted(items, key=lambda e: e["amount"], reverse=True)
+        ]
+    return "\n".join(lines)
+
+
+def share_card(period, income, total, paid_total, pending_total, balance, commitment,
+               expenses, message):
+    """Dibuja una imagen de resumen (con el gráfico) y permite compartirla o descargarla."""
+    items = [e for e in expenses if e["amount"] > 0]
+    payload = {
+        "title": "Resumen de la quincena",
+        "period": period_label(period),
+        "income": money(income),
+        "total": money(total),
+        "paid": money(paid_total),
+        "pending": money(pending_total),
+        "balance": money(balance),
+        "balanceNeg": balance < 0,
+        "commitment": f"{commitment:.0f}%",
+        "items": [
+            {
+                "name": e["name"],
+                "amount": money(e["amount"]),
+                "pct": e["amount"] / total if total > 0 else 0,
+                "paid": e["paid"],
+                "color": COLORS[i % len(COLORS)],
+            }
+            for i, e in enumerate(items)
+        ],
+        "message": message,
+        "filename": f"resumen-{period}.png",
+    }
+    js_data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    components.html(f"""
+<style>
+  body {{ margin: 0; font-family: "Source Sans Pro", sans-serif; }}
+  .btns {{ display: flex; gap: 8px; margin-bottom: 10px; }}
+  .btns button {{
+    flex: 1; min-height: 44px; border-radius: 8px; cursor: pointer; font-size: 15px;
+    border: 1px solid #33445f; background: #1b2940; color: #ffffff;
+  }}
+  .btns button:hover {{ border-color: #38bdf8; color: #38bdf8; }}
+  img {{ display: block; width: 100%; max-height: 430px; object-fit: contain;
+         border-radius: 12px; }}
+</style>
+<div class="btns">
+  <button id="share">📤 Compartir imagen</button>
+  <button id="download">⬇️ Descargar</button>
+</div>
+<img id="preview" alt="Vista previa del resumen">
+<script>
+const D = {js_data};
+const W = 720, PAD = 40, ROW = 44;
+const H = 150 + 2 * 104 + 300 + D.items.length * ROW + 110;
+const canvas = document.createElement("canvas");
+canvas.width = W; canvas.height = H;
+const c = canvas.getContext("2d");
+const FONT = '"Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+
+function roundRect(x, y, w, h, r, fill, stroke) {{
+  c.beginPath();
+  c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+  if (fill) {{ c.fillStyle = fill; c.fill(); }}
+  if (stroke) {{ c.strokeStyle = stroke; c.lineWidth = 2; c.stroke(); }}
+}}
+function fit(text, maxW) {{
+  if (c.measureText(text).width <= maxW) return text;
+  while (text.length > 1 && c.measureText(text + "…").width > maxW) text = text.slice(0, -1);
+  return text + "…";
+}}
+
+// Fondo y encabezado
+c.fillStyle = "#0e1525"; c.fillRect(0, 0, W, H);
+c.fillStyle = "#ffffff"; c.font = "bold 36px " + FONT;
+c.fillText("💰 " + D.title, PAD, 70);
+c.fillStyle = "#94a3b8"; c.font = "24px " + FONT;
+c.fillText(D.period, PAD, 110);
+
+// Tarjetas 2x2
+const stats = [["Ingreso", D.income], ["Gastos", D.total],
+               ["Disponible", D.balance], ["Comprometido", D.commitment]];
+const bw = (W - PAD * 2 - 16) / 2;
+stats.forEach(([label, value], i) => {{
+  const x = PAD + (i % 2) * (bw + 16), y = 140 + Math.floor(i / 2) * 104;
+  roundRect(x, y, bw, 90, 14, "#1b2940", "#33445f");
+  c.fillStyle = "#aab8cc"; c.font = "20px " + FONT; c.fillText(label, x + 18, y + 32);
+  c.fillStyle = (label === "Disponible" && D.balanceNeg) ? "#fb7185" : "#ffffff";
+  c.font = "bold 30px " + FONT; c.fillText(value, x + 18, y + 72);
+}});
+
+// Gráfico de dona
+let y0 = 140 + 2 * 104 + 10;
+const cx = W / 2, cy = y0 + 140, r = 125, inner = 78;
+if (D.items.length) {{
+  let a = -Math.PI / 2;
+  D.items.forEach(it => {{
+    const b = a + it.pct * Math.PI * 2;
+    c.beginPath(); c.moveTo(cx, cy); c.arc(cx, cy, r, a, b); c.closePath();
+    c.fillStyle = it.color; c.fill(); a = b;
+  }});
+}} else {{
+  c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fillStyle = "#22314a"; c.fill();
+}}
+c.beginPath(); c.arc(cx, cy, inner, 0, Math.PI * 2); c.fillStyle = "#0e1525"; c.fill();
+c.textAlign = "center";
+c.fillStyle = "#94a3b8"; c.font = "18px " + FONT; c.fillText("Total gastos", cx, cy - 6);
+c.fillStyle = "#ffffff"; c.font = "bold 26px " + FONT; c.fillText(D.total, cx, cy + 26);
+c.textAlign = "left";
+
+// Lista de gastos
+let y = y0 + 300;
+D.items.forEach(it => {{
+  c.beginPath(); c.arc(PAD + 9, y + 20, 8, 0, Math.PI * 2); c.fillStyle = it.color; c.fill();
+  c.fillStyle = "#ffffff"; c.font = "22px " + FONT;
+  c.fillText(fit(it.name, W - PAD * 2 - 330), PAD + 28, y + 28);
+  c.fillStyle = it.paid ? "#34d399" : "#fbbf24"; c.font = "18px " + FONT;
+  c.textAlign = "right";
+  c.fillText(it.paid ? "Pagado" : "Pendiente", W - PAD - 150, y + 28);
+  c.fillStyle = "#cbd5e1"; c.font = "bold 22px " + FONT;
+  c.fillText(it.amount, W - PAD, y + 28);
+  c.textAlign = "left";
+  c.fillStyle = "#22314a"; c.fillRect(PAD, y + ROW - 2, W - PAD * 2, 1);
+  y += ROW;
+}});
+
+// Pie: pagado / pendiente
+y += 24;
+roundRect(PAD, y, W - PAD * 2, 64, 14, D.balanceNeg ? "#3b1d2a" : "#12332b", null);
+c.fillStyle = D.balanceNeg ? "#fb7185" : "#34d399"; c.font = "bold 22px " + FONT;
+c.fillText(`Pagado ${{D.paid}}  ·  Pendiente ${{D.pending}}`, PAD + 20, y + 41);
+
+document.getElementById("preview").src = canvas.toDataURL("image/png");
+let blob = null;
+canvas.toBlob(b => {{ blob = b; }}, "image/png");
+
+function download() {{
+  const a = document.createElement("a");
+  a.href = canvas.toDataURL("image/png"); a.download = D.filename;
+  document.body.appendChild(a); a.click(); a.remove();
+}}
+document.getElementById("download").onclick = download;
+document.getElementById("share").onclick = async () => {{
+  // El iframe no tiene permiso "web-share"; se usa el navigator de la página principal.
+  let nav = navigator;
+  try {{ if (window.parent.navigator.share) nav = window.parent.navigator; }} catch (e) {{}}
+  if (blob && nav.canShare) {{
+    const file = new File([blob], D.filename, {{ type: "image/png" }});
+    if (nav.canShare({{ files: [file] }})) {{
+      try {{ await nav.share({{ files: [file], text: D.message }}); return; }}
+      catch (e) {{ if (e.name === "AbortError") return; }}
+    }}
+  }}
+  download();
+}};
+</script>
+""", height=500)
+
+
 # ---------------------------------------------------------------------------
 # Carga desde localStorage (solo la primera vez en cada sesión)
 # ---------------------------------------------------------------------------
@@ -205,10 +400,11 @@ tab_resumen, tab_gastos, tab_historial, tab_ajustes = st.tabs(
 
 # --- Gastos (se dibuja primero porque el resumen depende de él) ------------
 with tab_gastos:
-    st.number_input("Ingreso de la quincena ($)", min_value=0.0, step=10.0, key="income")
+    st.number_input("Ingreso de la quincena ($)", min_value=0.0, step=1.0, format="%.2f", key="income")
 
-    st.caption("Marca ✅ lo que ya pagaste. Usa **+** para añadir una fila; "
-               "selecciónala y toca 🗑️ para borrarla.")
+    st.caption("Marca ✅ lo que ya pagaste. Usa el botón verde **+** para añadir una fila. "
+               "Para borrar, toca el borde izquierdo de la fila para seleccionarla y "
+               "luego el botón rojo 🗑️ que aparece arriba de la tabla.")
 
     base = pd.DataFrame(st.session_state.editor_base, columns=["paid", "name", "amount"])
     base = base.astype({"paid": bool, "name": str, "amount": float})
@@ -224,7 +420,7 @@ with tab_gastos:
             "paid": st.column_config.CheckboxColumn("✅", default=False, width="small"),
             "name": st.column_config.TextColumn("Compromiso", required=True),
             "amount": st.column_config.NumberColumn(
-                "Monto", min_value=0.0, step=1.0, format="$%.2f", default=0.0
+                "Monto", min_value=0.0, step=0.01, format="$%.2f", default=0.0
             ),
         },
     )
@@ -305,6 +501,24 @@ with tab_resumen:
         st.markdown(legend, unsafe_allow_html=True)
     else:
         st.info("Todavía no hay gastos registrados.")
+
+    # --- Compartir ---------------------------------------------------------
+    st.subheader("📤 Compartir resumen")
+    message = build_message(data["period"], income, total, paid_total, pending_total,
+                            balance, commitment, expenses)
+    st.link_button(
+        "💬 Enviar resumen por WhatsApp",
+        f"https://wa.me/?text={quote(message)}",
+        type="primary",
+        use_container_width=True,
+    )
+    st.caption("Abre WhatsApp con el resumen escrito; tú eliges a quién enviarlo. "
+               "Para mandar el gráfico, usa **Compartir imagen** (en celular se abre el menú "
+               "para compartir; en computadora se descarga la imagen para que la adjuntes).")
+    share_card(data["period"], income, total, paid_total, pending_total,
+               balance, commitment, expenses, message)
+    with st.expander("Ver o copiar el texto"):
+        st.code(message, language=None)
 
 # --- Historial -------------------------------------------------------------
 with tab_historial:
